@@ -1,4 +1,5 @@
 # Hyperdown 每日自动签到。保活见 keepalive.yml。
+# 通知策略：签到失败立即邮件；每周一邮件汇总近 7 天；平时不发。
 name: Hyperdown Check-in
 
 on:
@@ -8,7 +9,7 @@ on:
     - cron: "5 0 * * *"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   checkin:
@@ -24,6 +25,8 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: Run check-in
+        id: checkin
+        continue-on-error: true
         env:
           HYPERDOWN_EMAIL: ${{ secrets.HYPERDOWN_EMAIL }}
           HYPERDOWN_PASSWORD: ${{ secrets.HYPERDOWN_PASSWORD }}
@@ -35,15 +38,93 @@ jobs:
           fi
           python checkin.py 2>&1 | tee checkin.log
 
-      - name: Notify via WxPusher
+      - name: Notify by email
         if: always()
         env:
-          WXPUSHER_APP_TOKEN: ${{ secrets.WXPUSHER_APP_TOKEN }}
-          WXPUSHER_UID: ${{ secrets.WXPUSHER_UID }}
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_AUTH_CODE: ${{ secrets.MAIL_AUTH_CODE }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          CHECKIN_OUTCOME: ${{ steps.checkin.outcome }}
         run: |
-          if [ -z "${WXPUSHER_APP_TOKEN:-}" ] || [ -z "${WXPUSHER_UID:-}" ]; then
-            echo "WXPUSHER_APP_TOKEN / WXPUSHER_UID 未配置，跳过通知"
-            exit 0
+          python - <<'PY'
+          import json, os, smtplib, ssl
+          from datetime import datetime, timezone, timedelta
+          from email.mime.text import MIMEText
+          from email.header import Header
+          from pathlib import Path
+
+          outcome = os.environ.get("CHECKIN_OUTCOME", "")
+          log_path = Path("checkin.log")
+          log_text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else "(无日志)"
+          lines = [l for l in log_text.splitlines() if l.strip()]
+          detail = lines[-1] if lines else "(无日志)"
+
+          bj = timezone(timedelta(hours=8))
+          now = datetime.now(bj)
+          today = now.strftime("%Y-%m-%d")
+          weekly = now.isoweekday() == 1  # 周一
+
+          hist_dir = Path("history")
+          hist_dir.mkdir(exist_ok=True)
+          hist_file = hist_dir / "checkin-history.jsonl"
+          with hist_file.open("a", encoding="utf-8") as f:
+              f.write(json.dumps({"date": today, "outcome": outcome, "detail": detail}, ensure_ascii=False) + "\n")
+
+          records = []
+          for ln in hist_file.read_text(encoding="utf-8").splitlines():
+              try:
+                  records.append(json.loads(ln))
+              except json.JSONDecodeError:
+                  pass
+          recent = records[-7:]
+          failed = outcome != "success"
+
+          user = os.environ.get("MAIL_USERNAME", "").strip()
+          pwd = os.environ.get("MAIL_AUTH_CODE", "").strip()
+          to = [x.strip() for x in os.environ.get("MAIL_TO", "").replace(",", " ").split() if x.strip()]
+
+          def send(subject, body):
+              if not (user and pwd and to):
+                  print("邮件未配置（MAIL_USERNAME/MAIL_AUTH_CODE/MAIL_TO），跳过发送")
+                  return
+              msg = MIMEText(body, "plain", "utf-8")
+              msg["Subject"] = Header(subject, "utf-8")
+              msg["From"] = user
+              msg["To"] = ", ".join(to)
+              ctx = ssl.create_default_context()
+              with smtplib.SMTP_SSL("smtp.qq.com", 465, context=ctx, timeout=30) as s:
+                  s.login(user, pwd)
+                  s.sendmail(user, to, msg.as_string())
+              print("邮件已发送:", subject)
+
+          if weekly:
+              ok = sum(1 for r in recent if r.get("outcome") == "success")
+              fail = len(recent) - ok
+              rows = "\n".join(
+                  "%s  %s  %s" % (r.get("date", "?"), "成功" if r.get("outcome") == "success" else "失败", r.get("detail", ""))
+                  for r in recent
+              )
+              body = "Hyperdown 近 %d 天签到汇总（截至 %s）\n\n成功 %d 天，失败 %d 天\n\n%s\n" % (len(recent), today, ok, fail, rows)
+              if failed:
+                  body += "\n[!] 本次运行签到失败，最近日志：\n" + "\n".join(lines[-8:]) + "\n"
+              send("【Hyperdown】每周签到汇总 " + today, body)
+          elif failed:
+              body = "Hyperdown 签到失败（%s）\n\n结果: %s\n\n最近日志：\n%s\n" % (today, outcome, "\n".join(lines[-8:]))
+              send("【Hyperdown】签到失败 " + today, body)
+          else:
+              print("签到正常，非汇总日，不发邮件")
+          PY
+
+      - name: Commit history
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add history/checkin-history.jsonl
+          if git diff --cached --quiet; then
+            echo "history 无变化"
+          else
+            git commit -m "chore: update checkin history [skip ci]"
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME:-main}" || true
+            git push origin "HEAD:${GITHUB_REF_NAME:-main}"
           fi
-          if [ -f checkin.log ]; then tail -n 6 checkin.log > notify.txt; else echo "(无日志)" > notify.txt; fi
-          python -c "import json,os,urllib.request,pathlib;t=os.environ['WXPUSHER_APP_TOKEN'];u=[x for x in os.environ['WXPUSHER_UID'].replace(',',' ').split() if x];c=pathlib.Path('notify.txt').read_text(encoding='utf-8',errors='replace');d=json.dumps({'appToken':t,'content':c,'summary':'Hyperdown 每日签到','contentType':1,'uids':u}).encode();r=urllib.request.Request('https://wxpusher.zjiecode.com/api/send/message',data=d,headers={'Content-Type':'application/json'});print(urllib.request.urlopen(r,timeout=20).read().decode('utf-8','replace'))"
