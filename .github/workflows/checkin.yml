@@ -33,4 +33,13 @@ jobs:
             echo "::error::缺少 Secrets：请配置 HYPERDOWN_EMAIL 与 HYPERDOWN_PASSWORD"
             exit 1
           fi
-          python checkin.py
+          python checkin.py 2>&1 | tee checkin.log
+
+      - name: Notify via PushPlus
+        if: always()
+        env:
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        run: |
+          if [ -z "${PUSHPLUS_TOKEN:-}" ]; then echo "PUSHPLUS_TOKEN 未配置，跳过通知"; exit 0; fi
+          if [ -f checkin.log ]; then tail -n 6 checkin.log > notify.txt; else echo "(无日志)" > notify.txt; fi
+          python -c "import json,os,urllib.request,pathlib;t=os.environ['PUSHPLUS_TOKEN'];c=pathlib.Path('notify.txt').read_text(encoding='utf-8',errors='replace');d=json.dumps({'token':t,'title':'Hyperdown 每日签到','content':c,'template':'txt'}).encode();r=urllib.request.Request('https://www.pushplus.plus/send',data=d,headers={'Content-Type':'application/json'});print(urllib.request.urlopen(r,timeout=20).read().decode('utf-8','replace'))"
