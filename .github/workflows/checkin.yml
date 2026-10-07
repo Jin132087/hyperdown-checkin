@@ -57,7 +57,13 @@ jobs:
           log_path = Path("checkin.log")
           log_text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else "(无日志)"
           lines = [l for l in log_text.splitlines() if l.strip()]
-          detail = lines[-1] if lines else "(无日志)"
+          def pick_detail(ls):
+              for kw in ("签到成功", "本次奖励", "今日已签到", "流量余额"):
+                  for l in reversed(ls):
+                      if kw in l:
+                          return l
+              return ls[-1] if ls else "(无日志)"
+          detail = pick_detail(lines)
 
           bj = timezone(timedelta(hours=8))
           now = datetime.now(bj)
