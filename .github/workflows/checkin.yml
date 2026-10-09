@@ -5,8 +5,8 @@ name: Hyperdown Check-in
 on:
   workflow_dispatch:
   schedule:
-    # UTC 00:05 ≈ 北京 08:05
-    - cron: "5 0 * * *"
+    # UTC 22:05 ≈ 北京 06:05
+    - cron: "5 22 * * *"
 
 permissions:
   contents: write
@@ -23,6 +23,9 @@ jobs:
           cache: pip
 
       - run: pip install -r requirements.txt
+
+      - name: Random delay
+        run: sleep $((RANDOM % 1800))
 
       - name: Run check-in
         id: checkin
